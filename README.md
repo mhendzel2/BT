@@ -20,6 +20,12 @@ streamlit run app.py
 2. In the sidebar, choose `ibkr` as the data source and set host/port/client id if different from defaults (127.0.0.1 / 7497 / 101).
 3. Click **Run optimization**. The app fetches daily bars via `ADJUSTED_LAST`, so paper/live permissions need to allow historical data.
 
+## Using CSV data
+1. Place your CSV files in the `sample_data` folder.
+2. Filenames should match the ticker symbol (e.g., `SPY.csv`, `AAPL.csv`).
+3. CSVs must have a date index and columns for `Adj Close` (or `Close`), `High`, and `Low`.
+4. In the sidebar, choose `csv` as the data source.
+
 ## Controls
 - **Universe**: choose tickers (defaults to a diversified S&P 500 subset). Add SPY to ensure regime detection.
 - **Lookback / Holding**: ranges and grid step define the optimization surface.

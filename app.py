@@ -54,7 +54,7 @@ def metrics_columns(result):
 
 with st.sidebar:
     st.header("Parameters")
-    data_source = st.selectbox("Data Source", ["yfinance", "ibkr"], index=0)
+    data_source = st.selectbox("Data Source", ["yfinance", "ibkr", "csv"], index=0)
     ib_host = st.text_input("IB host", "127.0.0.1") if data_source == "ibkr" else None
     ib_port = (
         st.number_input("IB port", min_value=1000, max_value=10000, value=7497, step=1)
@@ -66,6 +66,10 @@ with st.sidebar:
         if data_source == "ibkr"
         else None
     )
+    
+    if data_source == "csv":
+        st.info("Ensure CSV files (e.g. SPY.csv) are in the 'sample_data' folder.")
+
     tickers = st.multiselect("Universe (tickers)", options=DEFAULT_TICKERS, default=DEFAULT_TICKERS[:10])
     start_date = st.date_input("Start date", dt.date(2018, 1, 1))
     end_date = st.date_input("End date", dt.date.today())

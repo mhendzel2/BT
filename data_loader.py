@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 from typing import Dict, Iterable, Optional
 
 import pandas as pd
@@ -141,6 +142,86 @@ def fetch_ib_data(
     return {"close": close, "high": high, "low": low, "benchmark": benchmark}
 
 
+def fetch_csv_data(
+    tickers: Iterable[str],
+    start: dt.date,
+    end: dt.date,
+    benchmark: str = "SPY",
+    folder: str = "sample_data",
+) -> Dict[str, pd.DataFrame]:
+    tickers, start, end = _normalize_inputs(tickers, start, end)
+    symbols = sorted(set(tickers + [benchmark]))
+
+    close_frames = []
+    high_frames = []
+    low_frames = []
+
+    for symbol in symbols:
+        # Try various extensions or exact match
+        path = os.path.join(folder, f"{symbol}.csv")
+        if not os.path.exists(path):
+            # Try lowercase
+            path_lower = os.path.join(folder, f"{symbol.lower()}.csv")
+            if os.path.exists(path_lower):
+                path = path_lower
+            else:
+                print(f"File not found: {path}")
+                continue
+
+        try:
+            df = pd.read_csv(path, index_col=0, parse_dates=True)
+            # Ensure index is datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+            
+            df = df.sort_index()
+            # Filter by date
+            mask = (df.index >= pd.to_datetime(start)) & (df.index <= pd.to_datetime(end))
+            df = df.loc[mask]
+
+            # Handle column names (case insensitive)
+            df.columns = [c.strip() for c in df.columns]
+            col_map = {c.lower(): c for c in df.columns}
+            
+            # Close
+            if "adj close" in col_map:
+                c = df[col_map["adj close"]]
+            elif "close" in col_map:
+                c = df[col_map["close"]]
+            else:
+                print(f"No close price column in {path}")
+                continue
+
+            # High
+            if "high" in col_map:
+                h = df[col_map["high"]]
+            else:
+                h = c
+
+            # Low
+            if "low" in col_map:
+                l = df[col_map["low"]]
+            else:
+                l = c
+
+            close_frames.append(c.rename(symbol))
+            high_frames.append(h.rename(symbol))
+            low_frames.append(l.rename(symbol))
+
+        except Exception as e:
+            print(f"Error reading {path}: {e}")
+            continue
+
+    if close_frames:
+        close = pd.concat(close_frames, axis=1)
+        high = pd.concat(high_frames, axis=1).reindex(close.index)
+        low = pd.concat(low_frames, axis=1).reindex(close.index)
+    else:
+        close = high = low = pd.DataFrame()
+
+    return {"close": close, "high": high, "low": low, "benchmark": benchmark}
+
+
 def fetch_market_data(
     tickers: Iterable[str],
     start: dt.date,
@@ -151,4 +232,6 @@ def fetch_market_data(
 ) -> Dict[str, pd.DataFrame]:
     if source == "ibkr":
         return fetch_ib_data(tickers, start, end, benchmark=benchmark, **kwargs)
+    elif source == "csv":
+        return fetch_csv_data(tickers, start, end, benchmark=benchmark, **kwargs)
     return fetch_yfinance_data(tickers, start, end, benchmark=benchmark)
