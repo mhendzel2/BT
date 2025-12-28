@@ -1,15 +1,23 @@
 import datetime as dt
 from typing import Dict, Iterable, List, Optional, Tuple
+import sys
+import os
+
+# Add parent directory to path to import data_loader
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from data_loader import fetch_ib_data, fetch_yfinance_data
+
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [c.lower() for c in df.columns]
+    # Lowercase and remove underscores and spaces to standardize column names
+    df.columns = [c.lower().replace("_", "").replace(" ", "") for c in df.columns]
     if "ticker" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "ticker"})
     return df
@@ -328,6 +336,83 @@ def _cluster_anomalies(df: pd.DataFrame, feature_cols: List[str], n_clusters: in
     return scoped[["ticker", feature_cols[0]] + ["cluster", "cluster_flagged"]]
 
 
+import os
+import glob
+
+def _load_local_files(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    stock_df = pd.DataFrame()
+    chain_df = pd.DataFrame()
+    hot_df = pd.DataFrame()
+    eod_df = pd.DataFrame()
+    
+    # Handle quotes and file paths
+    folder = folder.strip('"').strip("'")
+    if os.path.isfile(folder):
+        folder = os.path.dirname(folder)
+    
+    if not os.path.exists(folder):
+        st.warning(f"Folder {folder} does not exist.")
+        return stock_df, chain_df, hot_df, eod_df
+
+    files = glob.glob(os.path.join(folder, "*.csv"))
+    if not files:
+        st.warning(f"No CSV files found in {os.path.abspath(folder)}.")
+        return stock_df, chain_df, hot_df, eod_df
+
+    st.info(f"Found {len(files)} files in {folder}. Attempting to categorize and merge...")
+    with st.expander("See found files"):
+        st.write([os.path.basename(f) for f in files])
+
+    stock_frames = []
+    chain_frames = []
+    
+    for f in files:
+        try:
+            # Try reading with default settings first
+            try:
+                df = pd.read_csv(f)
+                # If only one column, it might be tab separated or semicolon
+                if len(df.columns) <= 1:
+                     df = pd.read_csv(f, sep=None, engine='python')
+            except:
+                # Fallback to python engine auto-detection
+                df = pd.read_csv(f, sep=None, engine='python')
+
+            df = _normalize_cols(df)
+            date_col = _date_col(df)
+            if date_col:
+                df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+            
+            # Heuristic to identify file type
+            cols = set(df.columns)
+            if "callpremium" in cols or "putpremium" in cols:
+                stock_frames.append(df)
+            elif ("oichange" in cols or "oi_change" in cols) and "strike" in cols:
+                chain_frames.append(df)
+            elif "tradecode" in cols and "premium" in cols:
+                 # Likely DP EOD report, currently unused but recognized
+                 pass
+            elif "reportflags" in cols and "optionchainid" in cols:
+                 # Likely Bot EOD report, currently unused but recognized
+                 pass
+            else:
+                st.warning(f"Skipping {os.path.basename(f)}: Missing required columns. Found: {list(cols)}")
+            
+        except Exception as e:
+            st.error(f"Error reading {f}: {e}")
+
+    if stock_frames:
+        stock_df = pd.concat(stock_frames, ignore_index=True)
+        st.success(f"Loaded {len(stock_frames)} stock screener files.")
+    else:
+        st.warning("No stock screener files identified (looking for 'callpremium' or 'putpremium' columns).")
+
+    if chain_frames:
+        chain_df = pd.concat(chain_frames, ignore_index=True)
+        st.success(f"Loaded {len(chain_frames)} chain OI files.")
+        
+    return stock_df, chain_df, hot_df, eod_df
+
 st.title("Signal Scanner: Flow, Momentum, Earnings")
 st.caption(
     "Upload daily files to surface cross-sectional outliers, flow-backed momentum setups, and pre-earnings plays. "
@@ -336,11 +421,22 @@ st.caption(
 
 with st.sidebar:
     st.subheader("Inputs")
-    stock_upload = st.file_uploader("Stock screener CSV", type=["csv"], help="Includes price/volume/premium and nextearningsdate fields.")
-    chain_upload = st.file_uploader("Chain OI changes CSV", type=["csv"], help="Option-level OI change with strike/dte.")
-    hot_upload = st.file_uploader("Hot chains CSV (optional)", type=["csv"])
-    eod_upload = st.file_uploader("EOD report CSV (optional)", type=["csv"])
+    input_method = st.radio("Input Method", ["Upload Files", "Load from Local Folder"])
+    
+    stock_upload = None
+    chain_upload = None
+    hot_upload = None
+    eod_upload = None
+    local_folder = "sample_data"
 
+    if input_method == "Upload Files":
+        stock_upload = st.file_uploader("Stock screener CSV", type=["csv"], help="Includes price/volume/premium and nextearningsdate fields.")
+        chain_upload = st.file_uploader("Chain OI changes CSV", type=["csv"], help="Option-level OI change with strike/dte.")
+        hot_upload = st.file_uploader("Hot chains CSV (optional)", type=["csv"])
+        eod_upload = st.file_uploader("EOD report CSV (optional)", type=["csv"])
+    else:
+        local_folder = st.text_input("Folder Path", value="sample_data", help="Absolute path to folder containing CSV files.")
+    
     st.subheader("Settings")
     lookback = st.slider("Rolling window (days)", min_value=10, max_value=60, value=20, step=5)
     atm_band = st.slider("ATM band (as fraction of spot)", 0.01, 0.25, 0.10, step=0.01)
@@ -361,13 +457,20 @@ with st.sidebar:
 run = st.button("Run analysis")
 
 if run:
-    stock_df, stock_date_col = _read_csv(stock_upload)
-    chain_df, chain_date_col = _read_csv(chain_upload)
-    hot_df, hot_date_col = _read_csv(hot_upload)
-    eod_df, eod_date_col = _read_csv(eod_upload)
+    if input_method == "Upload Files":
+        stock_df, stock_date_col = _read_csv(stock_upload)
+        chain_df, chain_date_col = _read_csv(chain_upload)
+        hot_df, hot_date_col = _read_csv(hot_upload)
+        eod_df, eod_date_col = _read_csv(eod_upload)
+    else:
+        stock_df, chain_df, hot_df, eod_df = _load_local_files(local_folder)
+        stock_date_col = _date_col(stock_df) if not stock_df.empty else None
+        chain_date_col = _date_col(chain_df) if not chain_df.empty else None
+        hot_date_col = _date_col(hot_df) if not hot_df.empty else None
+        eod_date_col = _date_col(eod_df) if not eod_df.empty else None
 
     if stock_df.empty:
-        st.error("Stock screener file is required.")
+        st.error(f"Stock screener file is required. Please upload a file or ensure '{local_folder}' contains CSVs with 'callpremium' or 'putpremium' columns.")
         st.stop()
 
     stock_df, date_col = prepare_stock_features(stock_df, stock_date_col, lookback)
@@ -399,6 +502,121 @@ if run:
         top = signals.head(15)
         fig = px.bar(top, x="ticker", y="signal_strength", color="signal", hover_data=["reason"])
         st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("IBKR Performance Analysis")
+        st.caption("Fetch historical data to analyze the trajectory of these signals.")
+        
+        if st.button("Analyze Signals with IBKR"):
+            with st.spinner("Fetching market data from IBKR..."):
+                unique_tickers = signals["ticker"].unique().tolist()
+                # Fetch data from earliest signal date to today
+                start_date = pd.to_datetime(signals["date"]).min().date()
+                end_date = dt.date.today()
+                
+                try:
+                    # Try IBKR first
+                    market_data = fetch_ib_data(unique_tickers, start_date, end_date)
+                except Exception as e:
+                    st.error(f"IBKR connection failed: {e}. Falling back to Yahoo Finance.")
+                    market_data = fetch_yfinance_data(unique_tickers, start_date, end_date)
+                
+                if market_data and not market_data["close"].empty:
+                    perf_results = []
+                    close_prices = market_data["close"]
+                    
+                    for _, row in signals.iterrows():
+                        ticker = row["ticker"]
+                        signal_date = pd.to_datetime(row["date"])
+                        signal_type = row["signal"]
+                        
+                        if ticker not in close_prices.columns:
+                            continue
+                            
+                        prices = close_prices[ticker].dropna()
+                        if prices.empty:
+                            continue
+
+                        # Find closest date on or after signal date
+                        # Use searchsorted to find insertion point
+                        idx = prices.index.searchsorted(signal_date)
+                        
+                        if idx < len(prices):
+                            start_price = prices.iloc[idx]
+                            current_price = prices.iloc[-1]
+                            
+                            # Calculate return
+                            ret = (current_price - start_price) / start_price
+                            
+                            # Adjust for short signals
+                            if "Short" in signal_type or "Put" in signal_type:
+                                ret = -ret
+                                
+                            perf_results.append({
+                                "ticker": ticker,
+                                "signal_date": signal_date.date(),
+                                "signal": signal_type,
+                                "start_price": start_price,
+                                "current_price": current_price,
+                                "return": ret,
+                                "days_held": (prices.index[-1] - signal_date).days
+                            })
+                    
+                    if perf_results:
+                        perf_df = pd.DataFrame(perf_results)
+                        st.write("### Performance Trajectory")
+                        
+                        # Color code returns
+                        def color_return(val):
+                            color = 'green' if val > 0 else 'red'
+                            return f'color: {color}'
+                        
+                        st.dataframe(
+                            perf_df.style.format({
+                                "start_price": "{:.2f}",
+                                "current_price": "{:.2f}",
+                                "return": "{:.2%}"
+                            }).applymap(color_return, subset=['return']),
+                            use_container_width=True
+                        )
+                        
+                        # Plot trajectory
+                        fig_perf = px.bar(
+                            perf_df, 
+                            x="ticker", 
+                            y="return", 
+                            color="signal", 
+                            title="Return Since Signal",
+                            hover_data=["days_held", "start_price", "current_price"]
+                        )
+                        st.plotly_chart(fig_perf, use_container_width=True)
+                        
+                        # Outlier Analysis on Performance
+                        st.write("### Leading Indicators Analysis")
+                        st.caption("Correlation between signal strength and realized return.")
+                        
+                        # Merge performance back with signals to see if strength predicted return
+                        merged_perf = pd.merge(
+                            signals, 
+                            perf_df[["ticker", "signal_date", "return"]], 
+                            left_on=["ticker", "date"], 
+                            right_on=["ticker", "signal_date"]
+                        )
+                        
+                        if not merged_perf.empty:
+                            fig_corr = px.scatter(
+                                merged_perf, 
+                                x="signal_strength", 
+                                y="return", 
+                                color="signal", 
+                                hover_data=["ticker", "reason"],
+                                trendline="ols",
+                                title="Signal Strength vs. Realized Return"
+                            )
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                    else:
+                        st.warning("Could not calculate performance for any signals (missing price data).")
+                else:
+                    st.error("No market data returned.")
 
     st.subheader("Outlier Heatmap (cross-sectional z)")
     heat_cols = [c for c in merged.columns if c.endswith("_xsec_z")]
