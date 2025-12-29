@@ -366,6 +366,8 @@ def _load_local_files(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
 
     stock_frames = []
     chain_frames = []
+    hot_frames = []
+    eod_frames = []
     
     for f in files:
         try:
@@ -390,12 +392,10 @@ def _load_local_files(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
                 stock_frames.append(df)
             elif ("oichange" in cols or "oi_change" in cols) and "strike" in cols:
                 chain_frames.append(df)
-            elif "tradecode" in cols and "premium" in cols:
-                 # Likely DP EOD report, currently unused but recognized
-                 pass
-            elif "reportflags" in cols and "optionchainid" in cols:
-                 # Likely Bot EOD report, currently unused but recognized
-                 pass
+            elif "optionsymbol" in cols and "tapetime" in cols:
+                hot_frames.append(df)
+            elif "tradecode" in cols and "nbboask" in cols:
+                eod_frames.append(df)
             else:
                 st.warning(f"Skipping {os.path.basename(f)}: Missing required columns. Found: {list(cols)}")
             
@@ -411,6 +411,14 @@ def _load_local_files(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     if chain_frames:
         chain_df = pd.concat(chain_frames, ignore_index=True)
         st.success(f"Loaded {len(chain_frames)} chain OI files.")
+
+    if hot_frames:
+        hot_df = pd.concat(hot_frames, ignore_index=True)
+        st.success(f"Loaded {len(hot_frames)} hot chain files.")
+
+    if eod_frames:
+        eod_df = pd.concat(eod_frames, ignore_index=True)
+        st.success(f"Loaded {len(eod_frames)} EOD report files.")
         
     return stock_df, chain_df, hot_df, eod_df
 
@@ -478,13 +486,11 @@ if run:
     if input_method == "Database":
         try:
             engine = get_engine(db_url)
-            stock_df, chain_df = load_data_from_db(engine)
-            hot_df = pd.DataFrame()
-            eod_df = pd.DataFrame()
+            stock_df, chain_df, hot_df, eod_df = load_data_from_db(engine)
             stock_date_col = "date"
             chain_date_col = "date"
-            hot_date_col = None
-            eod_date_col = None
+            hot_date_col = "date"
+            eod_date_col = "date"
         except Exception as e:
             st.error(f"Failed to load from database: {e}")
             st.stop()

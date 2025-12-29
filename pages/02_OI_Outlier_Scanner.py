@@ -12,12 +12,22 @@ st.caption(
 )
 
 
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # Lowercase and remove underscores and spaces to standardize column names
+    df.columns = [c.lower().replace("_", "").replace(" ", "") for c in df.columns]
+    return df
+
+
 def _read_many(items):
     frames = []
     for item in items:
         try:
             df = pd.read_csv(item)
-            df.columns = [c.lower() for c in df.columns]
+            # If only one column, it might be tab separated or semicolon
+            if len(df.columns) <= 1:
+                    df = pd.read_csv(item, sep=None, engine='python')
+            df = _normalize_cols(df)
             frames.append(df)
         except Exception as exc:  # pragma: no cover - Streamlit surface
             name = item if isinstance(item, (str, Path)) else getattr(item, "name", "file")
@@ -76,7 +86,7 @@ with st.sidebar:
     z_thresh = st.slider("Z-score threshold", 2.0, 5.0, 3.0, step=0.1)
     iqr_mult = st.slider("IQR multiplier", 0.5, 3.0, 1.5, step=0.1)
     manip_pct = st.slider("Min % of total chain", 0.05, 0.5, 0.20, step=0.01)
-    manip_quantile = st.slider("Min oidiff quantile", 0.80, 0.99, 0.95, step=0.01)
+    manip_quantile = st.slider("Min OI Change quantile", 0.80, 0.99, 0.95, step=0.01)
     pre_earn_days = st.slider("Pre-earnings window (days)", 3, 30, 14)
     top_n = st.slider("Top candidates to display", 5, 30, 10)
 
@@ -101,26 +111,43 @@ if run:
         st.error("Please upload the chain-oi-changes CSV.")
         st.stop()
 
-    df_oi = _to_numeric(df_oi, ["oidiff", "stockprice", "percentageoftotal", "dte"])
-    df_oi = _parse_dates(df_oi, "currdate", "nextearningsdate")
-    oi_clean = df_oi["oidiff"].dropna()
+    # Ensure we have the right column names
+    if "oichange" not in df_oi.columns and "oidiff" in df_oi.columns:
+        df_oi = df_oi.rename(columns={"oidiff": "oichange"})
+    
+    if "underlyingsymbol" not in df_oi.columns:
+        if "ticker" in df_oi.columns:
+            df_oi = df_oi.rename(columns={"ticker": "underlyingsymbol"})
+        elif "symbol" in df_oi.columns:
+            df_oi = df_oi.rename(columns={"symbol": "underlyingsymbol"})
+    
+    # Fallback for date column
+    date_col = "asofdate"
+    if "currdate" in df_oi.columns:
+        date_col = "currdate"
+    elif "date" in df_oi.columns:
+        date_col = "date"
+
+    df_oi = _to_numeric(df_oi, ["oichange", "stockprice", "percentageoftotal", "dte"])
+    df_oi = _parse_dates(df_oi, date_col, "nextearningsdate")
+    oi_clean = df_oi["oichange"].dropna()
 
     abs_z, z_idx = zscore_outliers(oi_clean, z_thresh)
     df_oi.loc[abs_z.index, "z_score"] = abs_z
-    z_outliers = df_oi.loc[z_idx].copy().sort_values("oidiff", ascending=False)
+    z_outliers = df_oi.loc[z_idx].copy().sort_values("oichange", ascending=False)
 
     lower_bound, upper_bound = iqr_bounds(oi_clean, iqr_mult)
-    df_oi["is_iqr_outlier"] = (df_oi["oidiff"] < lower_bound) | (df_oi["oidiff"] > upper_bound)
-    iqr_outliers = df_oi[df_oi["is_iqr_outlier"]].copy().sort_values("oidiff", ascending=False)
+    df_oi["is_iqr_outlier"] = (df_oi["oichange"] < lower_bound) | (df_oi["oichange"] > upper_bound)
+    iqr_outliers = df_oi[df_oi["is_iqr_outlier"]].copy().sort_values("oichange", ascending=False)
 
     pre_earn = df_oi[df_oi["days_to_earnings"].notna() & (df_oi["days_to_earnings"] < pre_earn_days)].copy()
     threshold = oi_clean.quantile(manip_quantile) if not oi_clean.empty else np.nan
     manip_candidates = pre_earn[
-        (pre_earn["percentageoftotal"] > manip_pct) & (pre_earn["oidiff"] > threshold)
+        (pre_earn["percentageoftotal"] > manip_pct) & (pre_earn["oichange"] > threshold)
     ].copy()
     if not manip_candidates.empty:
         manip_candidates["manip_score"] = (
-            manip_candidates["oidiff"]
+            manip_candidates["oichange"]
             * manip_candidates["percentageoftotal"]
             * (1 / manip_candidates["days_to_earnings"].clip(lower=1))
         )
@@ -139,9 +166,9 @@ if run:
                 top_manip["underlyingsymbol"].iloc[0] if not top_manip.empty else "N/A",
             ],
             "Max OI Change": [
-                z_outliers["oidiff"].max() if not z_outliers.empty else 0,
-                iqr_outliers["oidiff"].max() if not iqr_outliers.empty else 0,
-                top_manip["oidiff"].max() if not top_manip.empty else 0,
+                z_outliers["oichange"].max() if not z_outliers.empty else 0,
+                iqr_outliers["oichange"].max() if not iqr_outliers.empty else 0,
+                top_manip["oichange"].max() if not top_manip.empty else 0,
             ],
         }
     )
@@ -150,15 +177,15 @@ if run:
     col1, col2 = st.columns(2)
     with col1:
         st.write("Z-Score Outliers")
-        st.dataframe(z_outliers[["underlyingsymbol", "plainoptionsymbol", "oidiff", "z_score", "days_to_earnings"]].head(top_n))
+        st.dataframe(z_outliers[["underlyingsymbol", "plainoptionsymbol", "oichange", "z_score", "days_to_earnings"]].head(top_n))
     with col2:
         st.write("IQR Outliers")
-        st.dataframe(iqr_outliers[["underlyingsymbol", "oidiff", "percentageoftotal"]].head(top_n))
+        st.dataframe(iqr_outliers[["underlyingsymbol", "oichange", "percentageoftotal"]].head(top_n))
 
     st.write("Top Manipulation Candidates")
     st.dataframe(
         top_manip[
-            ["underlyingsymbol", "oidiff", "percentageoftotal", "days_to_earnings", "manip_score"]
+            ["underlyingsymbol", "oichange", "percentageoftotal", "days_to_earnings", "manip_score"]
         ].head(top_n),
         use_container_width=True,
     )
@@ -172,7 +199,7 @@ if run:
             fig_hist.add_vline(upper_bound, line_dash="dash", line_color="red")
         if not z_outliers.empty:
             fig_hist.add_scatter(
-                x=z_outliers["oidiff"],
+                x=z_outliers["oichange"],
                 y=[0] * len(z_outliers),
                 mode="markers",
                 marker=dict(color="orange", size=10),
@@ -185,7 +212,7 @@ if run:
             top_manip.head(top_n),
             x="underlyingsymbol",
             y="manip_score",
-            hover_data=["oidiff", "percentageoftotal", "days_to_earnings"],
+            hover_data=["oichange", "percentageoftotal", "days_to_earnings"],
             title="Top Manipulation Candidates",
         )
         st.plotly_chart(fig_bar, use_container_width=True)
@@ -193,9 +220,9 @@ if run:
     symbol_corr = []
     if not top_manip.empty:
         for symbol in top_manip["underlyingsymbol"].dropna().unique():
-            sym = df_oi[df_oi["underlyingsymbol"] == symbol].dropna(subset=["oidiff", "stockprice"])
-            if len(sym) > 5 and sym["oidiff"].std() > 0 and sym["stockprice"].std() > 0:
-                corr = np.corrcoef(sym["oidiff"], sym["stockprice"])[0, 1]
+            sym = df_oi[df_oi["underlyingsymbol"] == symbol].dropna(subset=["oichange", "stockprice"])
+            if len(sym) > 5 and sym["oichange"].std() > 0 and sym["stockprice"].std() > 0:
+                corr = np.corrcoef(sym["oichange"], sym["stockprice"])[0, 1]
                 symbol_corr.append({"symbol": symbol, "corr": corr, "n": len(sym)})
     corr_df = pd.DataFrame(symbol_corr)
     if not corr_df.empty:
@@ -204,9 +231,9 @@ if run:
 
     if not pre_earn.empty:
         fig_scatter = px.scatter(
-            pre_earn.dropna(subset=["oidiff", "days_to_earnings"]),
+            pre_earn.dropna(subset=["oichange", "days_to_earnings"]),
             x="days_to_earnings",
-            y="oidiff",
+            y="oichange",
             color="percentageoftotal",
             size="percentageoftotal",
             hover_data=["underlyingsymbol", "plainoptionsymbol"] if "plainoptionsymbol" in pre_earn.columns else ["underlyingsymbol"],

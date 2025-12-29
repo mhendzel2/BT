@@ -67,17 +67,34 @@ def ingest_folder(folder_path: str, engine):
                 table_name = "stock_screener"
             elif ("oichange" in cols or "oi_change" in cols) and "strike" in cols:
                 table_name = "chain_oi"
+            elif "optionsymbol" in cols and "tapetime" in cols:
+                table_name = "hot_chains"
+            elif "tradecode" in cols and "nbboask" in cols:
+                table_name = "dp_eod"
             
             if table_name:
                 # Ensure date column is datetime
-                for date_col in ["date", "trade_date", "asofdate", "timestamp"]:
+                date_found = False
+                for date_col in ["date", "trade_date", "asofdate", "timestamp", "executedat", "tapetime"]:
                     if date_col in df.columns:
                         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-                        # Rename to standard 'date'
-                        if date_col != "date":
+                        # Rename to standard 'date' if it's the primary date
+                        if date_col != "date" and not date_found:
                             df = df.rename(columns={date_col: "date"})
-                        break
+                            date_found = True
+                        elif date_col == "date":
+                            date_found = True
                 
+                # Specific type conversions for known columns
+                numeric_cols = [
+                    "callvolume", "putvolume", "callpremium", "putpremium", 
+                    "strike", "price", "premium", "size", "volume", 
+                    "openinterest", "bid", "ask", "iv", "delta", "gamma", "theta", "vega"
+                ]
+                for c in numeric_cols:
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors='coerce')
+
                 # Add filename for lineage
                 df["source_file"] = filename
                 
@@ -116,5 +133,15 @@ def load_data_from_db(engine, start_date=None, end_date=None):
         chain_df = pd.read_sql(text(f"SELECT * FROM chain_oi WHERE 1=1 {date_filter}"), engine, params=query_params)
     except Exception:
         chain_df = pd.DataFrame()
+
+    try:
+        hot_df = pd.read_sql(text(f"SELECT * FROM hot_chains WHERE 1=1 {date_filter}"), engine, params=query_params)
+    except Exception:
+        hot_df = pd.DataFrame()
+
+    try:
+        eod_df = pd.read_sql(text(f"SELECT * FROM dp_eod WHERE 1=1 {date_filter}"), engine, params=query_params)
+    except Exception:
+        eod_df = pd.DataFrame()
         
-    return stock_df, chain_df
+    return stock_df, chain_df, hot_df, eod_df
