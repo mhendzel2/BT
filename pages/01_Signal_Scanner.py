@@ -338,6 +338,7 @@ def _cluster_anomalies(df: pd.DataFrame, feature_cols: List[str], n_clusters: in
 
 import os
 import glob
+from db_utils import get_engine, init_db, ingest_folder, load_data_from_db, DEFAULT_DB_URL
 
 def _load_local_files(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     stock_df = pd.DataFrame()
@@ -421,15 +422,32 @@ st.caption(
 
 with st.sidebar:
     st.subheader("Inputs")
-    input_method = st.radio("Input Method", ["Upload Files", "Load from Local Folder"])
+    input_method = st.radio("Input Method", ["Database", "Upload Files", "Load from Local Folder"])
     
     stock_upload = None
     chain_upload = None
     hot_upload = None
     eod_upload = None
     local_folder = "sample_data"
+    db_url = DEFAULT_DB_URL
 
-    if input_method == "Upload Files":
+    if input_method == "Database":
+        db_url = st.text_input("Database URL", value=DEFAULT_DB_URL, type="password")
+        local_folder = st.text_input("Folder to Ingest", value="sample_data", help="Folder containing CSVs to add to DB.")
+        if st.button("Ingest/Update Database"):
+            try:
+                engine = get_engine(db_url)
+                init_db(engine)
+                count, errors = ingest_folder(local_folder, engine)
+                st.success(f"Imported {count} new files.")
+                if errors:
+                    st.error(f"Encountered {len(errors)} errors.")
+                    with st.expander("See errors"):
+                        st.write(errors)
+            except Exception as e:
+                st.error(f"Database error: {e}")
+
+    elif input_method == "Upload Files":
         stock_upload = st.file_uploader("Stock screener CSV", type=["csv"], help="Includes price/volume/premium and nextearningsdate fields.")
         chain_upload = st.file_uploader("Chain OI changes CSV", type=["csv"], help="Option-level OI change with strike/dte.")
         hot_upload = st.file_uploader("Hot chains CSV (optional)", type=["csv"])
@@ -457,7 +475,20 @@ with st.sidebar:
 run = st.button("Run analysis")
 
 if run:
-    if input_method == "Upload Files":
+    if input_method == "Database":
+        try:
+            engine = get_engine(db_url)
+            stock_df, chain_df = load_data_from_db(engine)
+            hot_df = pd.DataFrame()
+            eod_df = pd.DataFrame()
+            stock_date_col = "date"
+            chain_date_col = "date"
+            hot_date_col = None
+            eod_date_col = None
+        except Exception as e:
+            st.error(f"Failed to load from database: {e}")
+            st.stop()
+    elif input_method == "Upload Files":
         stock_df, stock_date_col = _read_csv(stock_upload)
         chain_df, chain_date_col = _read_csv(chain_upload)
         hot_df, hot_date_col = _read_csv(hot_upload)
@@ -470,7 +501,12 @@ if run:
         eod_date_col = _date_col(eod_df) if not eod_df.empty else None
 
     if stock_df.empty:
-        st.error(f"Stock screener file is required. Please upload a file or ensure '{local_folder}' contains CSVs with 'callpremium' or 'putpremium' columns.")
+        msg = "Stock screener data is required."
+        if input_method == "Database":
+            msg += " Ensure you have ingested data into the database."
+        else:
+            msg += f" Please upload a file or ensure '{local_folder}' contains CSVs with 'callpremium' or 'putpremium' columns."
+        st.error(msg)
         st.stop()
 
     stock_df, date_col = prepare_stock_features(stock_df, stock_date_col, lookback)

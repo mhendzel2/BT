@@ -5,3 +5,5 @@ streamlit
 plotly
 ib_insync
 scikit-learn
+sqlalchemy
+psycopg2-binary

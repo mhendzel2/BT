@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import streamlit as st
+from pathlib import Path
 
 
 st.title("OI Outlier Scanner")
@@ -11,16 +12,19 @@ st.caption(
 )
 
 
-def _read_csv(upload):
-    if upload is None:
+def _read_many(items):
+    frames = []
+    for item in items:
+        try:
+            df = pd.read_csv(item)
+            df.columns = [c.lower() for c in df.columns]
+            frames.append(df)
+        except Exception as exc:  # pragma: no cover - Streamlit surface
+            name = item if isinstance(item, (str, Path)) else getattr(item, "name", "file")
+            st.error(f"Could not read {name}: {exc}")
+    if not frames:
         return pd.DataFrame()
-    try:
-        df = pd.read_csv(upload)
-    except Exception as exc:  # pragma: no cover - Streamlit surface
-        st.error(f"Could not read {getattr(upload, 'name', 'file')}: {exc}")
-        return pd.DataFrame()
-    df.columns = [c.lower() for c in df.columns]
-    return df
+    return pd.concat(frames, ignore_index=True)
 
 
 def _to_numeric(df: pd.DataFrame, cols):
@@ -63,7 +67,8 @@ def iqr_bounds(series: pd.Series, multiplier: float):
 
 with st.sidebar:
     st.subheader("Inputs")
-    oi_upload = st.file_uploader("chain-oi-changes CSV", type=["csv"])
+    oi_uploads = st.file_uploader("chain-oi-changes CSVs", type=["csv"], accept_multiple_files=True)
+    dir_path = st.text_input("Directory with outlier CSVs", value="", help="Optional: load all CSVs from this folder.")
     hot_upload = st.file_uploader("hot-chains CSV (optional)", type=["csv"])
     eod_upload = st.file_uploader("dp-eod-report CSV (optional)", type=["csv"])
 
@@ -78,9 +83,19 @@ with st.sidebar:
 run = st.button("Run analysis")
 
 if run:
-    df_oi = _read_csv(oi_upload)
-    df_hot = _read_csv(hot_upload)
-    df_eod = _read_csv(eod_upload)
+    inputs = list(oi_uploads or [])
+    if dir_path.strip():
+        folder = Path(dir_path).expanduser()
+        if folder.is_dir():
+            found = sorted(folder.glob("*.csv"))
+            inputs.extend(found)
+            st.info(f"Loaded {len(found)} CSV files from {folder}")
+        else:
+            st.warning(f"Directory not found: {folder}")
+
+    df_oi = _read_many(inputs)
+    df_hot = _read_many([hot_upload] if hot_upload else [])
+    df_eod = _read_many([eod_upload] if eod_upload else [])
 
     if df_oi.empty:
         st.error("Please upload the chain-oi-changes CSV.")
